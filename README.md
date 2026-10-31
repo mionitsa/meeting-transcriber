@@ -245,6 +245,13 @@ past-tense verbs, 33 of the 40 had enough first-person speech to cross-check, an
 contradicted the voice match. That is one person's meetings and microphone, with no
 hand-labelled ground truth, so treat the numbers as a starting point.
 
+## Mac app
+
+`macos/build.sh --install` builds Meeting Transcriber.app into `/Applications`. Open it
+to pick a recording, or drop audio or video files on its icon: it asks who was on the
+call, runs `transcribe` in a Terminal window and opens the meeting folder when it is
+done. See [macos/README.md](macos/README.md).
+
 ## Recording calls on macOS
 
 `transcribe record` captures the call audio (through
