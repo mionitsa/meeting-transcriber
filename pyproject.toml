@@ -1,6 +1,6 @@
 [project]
 name = "meeting-transcriber"
-version = "0.1.0"
+version = "0.2.0"
 description = "Turn meeting recordings into transcripts with named speakers and a summary."
 readme = "README.md"
 license = "MIT"

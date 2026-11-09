@@ -185,6 +185,13 @@ llm:
   api_key_env: MYCOMPANY_LLM_KEY     # optional: read the key from another variable
 ```
 
+Used as a library inside another program, pass your own function instead of a provider,
+and every prompt goes through it:
+
+```python
+llm_cfg = {"call": lambda prompt, model: my_client.ask(prompt), "model": "my-model"}
+```
+
 Rate limits and server errors are retried with backoff. A long transcript needs a model
 with a large context window: a one-hour call is roughly 9,000 words.
 

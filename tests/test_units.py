@@ -625,3 +625,11 @@ def test_end_to_end_with_stubbed_services(tmp_path, monkeypatch, capsys):
                       "summary": str(mtg / "summary.md"),
                       "short": str(mtg / "summary-short.txt"),
                       "recording": str(mtg / "recording.mp3")}
+
+
+def test_complete_uses_an_injected_call_and_sends_nothing():
+    seen = []
+    cfg = {"call": lambda prompt, model: seen.append((prompt, model)) or "ok", "model": "m"}
+    assert llm.complete(cfg, "hi") == "ok"
+    assert llm.complete(cfg, "yo", "other") == "ok"
+    assert seen == [("hi", "m"), ("yo", "other")]

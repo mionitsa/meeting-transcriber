@@ -11,6 +11,9 @@ account rather than a key.
       # base_url: https://...       # override, or required for openai-compatible
       # api_key_env: MY_KEY_VAR     # read the key from a different variable
       # max_tokens: 8192            # raise if long summaries come back cut off
+
+Used as a library, `cfg["call"]` may instead be any `call(prompt, model) -> str`,
+so a host application sends the prompts through its own client.
 """
 
 from __future__ import annotations
@@ -45,8 +48,10 @@ TIMEOUT = 600  # seconds; summarising a long meeting can take minutes
 
 def complete(cfg: dict, prompt: str, model: str | None = None) -> str:
     """Send one user message, return the reply text."""
-    provider = str(cfg.get("provider") or "").lower()
     model = model or cfg.get("model")
+    if callable(cfg.get("call")):
+        return cfg["call"](prompt, model)
+    provider = str(cfg.get("provider") or "").lower()
     if not provider or not model:
         raise Error("set llm.provider and llm.model in config.yaml (see `transcribe init`)")
     log.debug("LLM request: %s / %s, %d chars", provider, model, len(prompt))
