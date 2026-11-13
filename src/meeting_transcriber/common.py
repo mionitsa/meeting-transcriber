@@ -19,8 +19,6 @@ HOME = Path(os.environ.get("MEETING_TRANSCRIBER_HOME")
 CACHE = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "meeting-transcriber"
 CONFIG = HOME / "config.yaml"
 ENV = HOME / ".env"
-VOICES = HOME / "voices"            # enrolment clips: <person>-<lang>.<ext>
-VOICEPRINTS = HOME / "voiceprints"  # built from them by `transcribe voices enroll`
 
 # Picked up from the inbox folder. A file passed by path can be anything ffmpeg
 # can decode, whatever its extension.
@@ -123,7 +121,7 @@ def load_config() -> dict:
 
 def settings_for(cfg: dict, project: dict | None) -> dict:
     """Top-level settings with the project's own overrides on top."""
-    base = {k: v for k, v in cfg.items() if k not in ("projects", "voices", "llm")}
+    base = {k: v for k, v in cfg.items() if k not in ("projects", "llm")}
     return {"name": "", "speakers": [], "roles": {}, "context": "", "keyterms": [],
             **base, **(project or {})}
 

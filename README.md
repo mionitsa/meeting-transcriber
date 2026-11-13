@@ -26,8 +26,7 @@ Bob?: That's the backfill job, I'll rerun it today.
   flac, aac, amr, wma, mp4, mov, webm, mkv, and so on. Several parts are joined in order.
 - **Any LLM.** OpenRouter, OpenAI, Anthropic, Gemini, Vertex AI, Fireworks, Together,
   Groq, DeepSeek, Mistral, xAI, a local Ollama, or any OpenAI-compatible gateway.
-- **Honest speaker names.** A guess is marked `Name?` instead of being presented as fact,
-  and optional voiceprints recognise regular speakers by their voice.
+- **Honest speaker names.** A guess is marked `Name?` instead of being presented as fact.
 - **The words are never rewritten.** The LLM only decides which voice belongs to whom;
   the transcript text is exactly what speech recognition heard.
 
@@ -40,11 +39,7 @@ Bob?: That's the backfill job, I'll rerun it today.
         |
  ElevenLabs Scribe: words, timestamps, anonymous voices (speaker_0, speaker_1, ...)
         |
- voice ID (optional): compare each voice with enrolled voiceprints
-        |-- confident match ---------> name pinned
-        |-- unsure / unknown voice ---> passed on, with the scores
-        |
- LLM: names the remaining voices from the conversation
+ LLM: names the voices from the conversation
         |
  transcript.md -> summary.md + summary-short.txt -> recording filed alongside
 ```
@@ -88,7 +83,6 @@ terminal. Optional extras go in the same command:
 | Extra | For | Install |
 |---|---|---|
 | `vertex` | Google Vertex AI as the LLM | `uv tool install "meeting-transcriber[vertex] @ git+https://github.com/mionitsa/meeting-transcriber"` |
-| `voice` | recognising speakers by voice (PyTorch, a large download) | `uv tool install "meeting-transcriber[voice] @ git+https://github.com/mionitsa/meeting-transcriber"` |
 
 From a clone, `uv tool install -e .` installs your checkout.
 
@@ -152,7 +146,6 @@ Other commands:
 transcribe doctor                                           # check the setup
 transcribe summarize ~/Meetings/2026-08-04/transcript.md   # redo the summary
 transcribe projects                                         # list projects
-transcribe voices enroll                                    # build voiceprints
 transcribe record                                           # record a call (macOS)
 ```
 
@@ -221,37 +214,6 @@ straight into a notes folder such as an Obsidian vault) and `frontmatter: true` 
 transcripts apart from hand-written notes). See the comments in the generated
 `config.yaml`.
 
-## Recognising speakers by voice
-
-Speech recognition separates voices well but does not know whose they are, and naming
-them from the content fails when nobody says a name. With the `voice` extra installed,
-record a short solo clip of each regular speaker (30 to 60 seconds of normal speech is
-plenty) and put it in `~/.config/meeting-transcriber/voices/`, named
-`<person>-<language>.<ext>`, for example `alice-en.m4a`. Then:
-
-```bash
-transcribe voices enroll   # build voiceprints from the clips
-transcribe voices check    # similarity matrix: same person vs different people
-```
-
-From then on every label's voice is compared with the voiceprints of the expected
-speakers (everyone enrolled, when no speaker list is given). A name is pinned only when
-the match is strong, clearly ahead of the runner-up, and consistent across the label's
-own audio. Weaker matches go to the LLM along with the scores, and a score below 0.30
-counts as evidence that the voice is *not* that person, which the LLM is not allowed to
-overrule. When one label turns out to hold two people, the parts that can be recognised
-are split off.
-
-Use clips from the same kind of audio as your calls, and enrol people who switch
-languages once per language: matching across languages is noticeably weaker.
-
-The thresholds were tuned on 15 real meetings with 49 speaker labels: 40 were named by
-voice (scores 0.48 to 0.88, versus 0.08 to 0.27 for people with no voiceprint), the
-other 9 were genuinely ambiguous and went to the LLM. In a language that marks gender in
-past-tense verbs, 33 of the 40 had enough first-person speech to cross-check, and none
-contradicted the voice match. That is one person's meetings and microphone, with no
-hand-labelled ground truth, so treat the numbers as a starting point.
-
 ## Recording calls on macOS
 
 `transcribe record` captures the call audio (through
@@ -265,17 +227,15 @@ and pass the file.
 ## Privacy
 
 The audio is sent to ElevenLabs, and the transcript text to your LLM provider. Use
-`ollama` or your own gateway to keep the text on infrastructure you control. Config,
-voiceprints and the cache stay on your machine (`~/.config/meeting-transcriber`,
+`ollama` or your own gateway to keep the text on infrastructure you control. Config and
+the cache stay on your machine (`~/.config/meeting-transcriber`,
 `~/.cache/meeting-transcriber`).
 
 ## Limitations
 
 - Speech to text is ElevenLabs only.
-- Voice ID recognises enrolled people only. Two unenrolled guests under one label stay
-  merged; a dedicated diarizer would be the proper fix.
-- Speaker names are only as good as the clues: with no speaker list, no voiceprints and
-  nobody saying a name, voices stay `Speaker 1`, `Speaker 2`.
+- Speaker names are only as good as the clues: with no speaker list and nobody saying a
+  name, voices stay `Speaker 1`, `Speaker 2`.
 
 ## Development
 
@@ -293,7 +253,6 @@ src/meeting_transcriber/
   transcribe.py   the pipeline: audio, Scribe, speaker naming, rendering, filing
   summarize.py    long and short summaries
   llm.py          LLM providers
-  voiceid.py      voiceprint enrolment and matching
   record.py       macOS recorder
   common.py       paths, config, logging
 tests/

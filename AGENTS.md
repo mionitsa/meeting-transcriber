@@ -13,8 +13,7 @@ what you cannot find out yourself.
    before installing it: `brew install uv ffmpeg` on macOS; on Linux,
    `sudo apt install ffmpeg` and `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
-2. **Install.** Add `[vertex]` for Google Vertex AI and `[voice]` for voice
-   recognition of speakers (a large PyTorch download, only if the user wants it):
+2. **Install.** Add `[vertex]` for Google Vertex AI:
 
    ```bash
    uv tool install git+https://github.com/mionitsa/meeting-transcriber
@@ -83,7 +82,6 @@ transcribe <files...> [-p PROJECT] [-s "Alice, Sam: client"] [-d "Bob"] [-n "Tit
            [-l LANGUAGE] [-o DIR] [--no-summary] [--json] [--retranscribe] [-v|-q]
 transcribe summarize <transcript.md> [-p PROJECT] [--language LANG]
 transcribe projects [NAME]
-transcribe voices enroll|check
 ```
 
 Speakers named `Name?` in a transcript were guessed with low confidence; `Speaker 2`
@@ -100,13 +98,14 @@ means nobody could tell. Re-running the same file does not charge ElevenLabs aga
 | HTTP 404 or "model not found" | wrong model id for that provider; check their model list |
 | Vertex `403 PERMISSION_DENIED` | the credentials' account has no access to the project; use a service account key from that project |
 | `transcribed before with a different number of speakers` | add `--retranscribe` (charges ElevenLabs again) |
+| `transcribed before with scribe_v2, the config now says ...` | add `--retranscribe` (charges ElevenLabs again) |
 | summary cut off | raise `llm.max_tokens` in `config.yaml` |
 
 ## Working on the code
 
 - `uv run pytest` runs the tests: no network or keys, ffmpeg needed for the audio tests.
 - Layout: `src/meeting_transcriber/` (`cli.py` commands, `transcribe.py` pipeline,
-  `summarize.py`, `llm.py` providers, `voiceid.py`, `record.py`, `common.py`).
+  `summarize.py`, `llm.py` providers, `record.py`, `common.py`).
 - Conventions: progress and warnings go through `log` (stderr); results go to stdout
   with `print`. Failures the user can act on raise `common.Error` with the fix in the
   message; `cli.main` prints it as `error: ...` and exits 1.

@@ -183,13 +183,6 @@ def doctor(argv: list[str]) -> None:
         except Error as e:
             report(False, name, str(e).splitlines()[0][:300])
 
-    try:
-        import speechbrain  # noqa: F401
-        voice = True
-    except ImportError:
-        voice = None
-    report(voice, "voice ID (optional)", "" if voice else
-           "uv tool install 'meeting-transcriber[voice]' to recognise speakers by voice")
     if failed:
         sys.exit(1)
     print("\nReady: transcribe path/to/recording.m4a")
@@ -225,17 +218,8 @@ def projects(argv: list[str]) -> None:
           f"  keyterms: {', '.join(map(str, s.get('keyterms') or []))}")
 
 
-def voices(argv: list[str]) -> None:
-    try:
-        from . import voiceid
-    except ImportError:
-        raise Error("voice ID needs the voice extra: "
-                    "uv tool install 'meeting-transcriber[voice]'") from None
-    voiceid.run(argv)
-
-
 COMMANDS = {"init": init, "doctor": doctor, "projects": projects, "summarize": summarize.run,
-            "voices": voices, "record": record.run}
+            "record": record.run}
 
 
 def main(argv: list[str] | None = None) -> None:
