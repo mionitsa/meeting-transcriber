@@ -46,10 +46,3 @@ projects: {}
 #    frontmatter: true   # mark transcripts apart from hand-written notes
 #    summary: false      # summarize on demand: transcribe summarize <file>
 #    speakers: [Alice]
-
-# ── voice ID (optional): see `transcribe voices --help` ──────────────────────
-# Left: the person part of a clip's file name in voices/ (<person>-<lang>.<ext>).
-# Right: how that person is spelled in speaker lists. A person with no entry here
-# matches by file name (alice-en.m4a matches Alice).
-voices: {}
-#  alice: [Alice, Alice Smith]

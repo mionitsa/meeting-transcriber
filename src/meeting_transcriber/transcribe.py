@@ -3,8 +3,7 @@ The pipeline behind `transcribe <audio>`:
 
   audio or video file(s) -> ffmpeg (one mono track)
   -> ElevenLabs Scribe (words, timestamps, anonymous speaker labels)
-  -> voice ID against enrolled voiceprints (optional)
-  -> the LLM names the labels voice ID could not settle (small JSON reply)
+  -> the LLM names the labels (small JSON reply)
   -> transcript.md, rendered deterministically: the LLM never rewrites the text
   -> summaries (summarize.py)
   -> the recording is filed next to them, one folder per meeting
@@ -28,13 +27,12 @@ import tempfile
 from pathlib import Path
 
 from . import llm, summarize
-from .common import (CACHE, MEDIA_EXTS, PACKAGE, VOICEPRINTS, Error, apply_verbosity,
+from .common import (CACHE, MEDIA_EXTS, Error, apply_verbosity,
                      find_project, load_config, log, require, settings_for, slugify,
                      unique_path, verbosity_flags)
 
 MAP_CHAR_CAP = 120_000  # cap on transcript text sent to the LLM for speaker naming
 KEYTERM_CAP = 100       # ElevenLabs caps the keyterm list
-VOICE_UNLIKELY = 0.30   # mirrors voiceid.UNKNOWN_SCORE: below this it is not them
 
 
 # ── setup ────────────────────────────────────────────────────────────────────
@@ -199,176 +197,6 @@ def build_turns(words: list[dict]) -> list[dict]:
     return [t for t in turns if t["text"]]
 
 
-# ── voice identification (voiceid.py) ────────────────────────────────────────
-
-def voice_identify(audio: Path, words: list[dict], speakers: list[str], fp: str) -> dict:
-    """Name the diarization labels by voice -> {speaker_id: {...}}.
-
-    Voice ID is an upgrade, never a hard dependency: with nothing enrolled, the
-    voice extra not installed, or any failure, it returns {} and the run goes on
-    with the LLM naming every label.
-    """
-    index = VOICEPRINTS / "index.json"
-    if not index.exists():
-        return {}
-    try:
-        from . import voiceid
-    except ImportError:
-        log.warning("voiceprints are enrolled, but voice ID needs the voice extra: "
-                    "uv tool install 'meeting-transcriber[voice]'")
-        return {}
-
-    candidates = speakers or voiceid.enrolled_names()
-    # keyed on voiceid.py and the enrolled prints too: re-enrolling someone, or
-    # changing a threshold, must not be answered from a stale cache
-    rev = hashlib.sha1((PACKAGE / "voiceid.py").read_bytes() + index.read_bytes()
-                       + ",".join(candidates).encode()).hexdigest()[:8]
-    cached = CACHE / f"voice-{fp}-{rev}.json"
-    if cached.exists():
-        log.info("Voice ID: using the cached result")
-        return json.loads(cached.read_text())
-
-    log.info("Voice ID: comparing the speakers with %d enrolled voice(s)", len(candidates))
-    try:
-        out = voiceid.identify(audio, words, candidates)
-    except Exception as e:
-        log.warning("voice ID failed (%s), naming speakers from the conversation only", e)
-        log.debug("voice ID traceback", exc_info=True)
-        return {}
-    if not out:
-        log.info("Voice ID: none of these speakers has a voiceprint")
-    cached.write_text(json.dumps(out, ensure_ascii=False))
-    return out
-
-
-def apply_voice_splits(words: list[dict], voice: dict) -> dict:
-    """Break up labels that hold more than one voice.
-
-    Diarization sometimes files two people under one label; then the label itself
-    is the error and renaming it cannot help. Where voice ID resolved individual
-    stretches, those words move to their own label (`speaker_2·Alice`) pinned to
-    that person; anything it could not resolve stays put. Returns {label: name}.
-    """
-    spans = [(sid, s["start"], s["end"], f"{sid}·{s['name']}", s["name"])
-             for sid, v in voice.items() for s in (v.get("split") or [])]
-    if not spans:
-        return {}
-    for w in words:
-        start = w.get("start")
-        if start is None:
-            continue
-        for sid, a, b, label, _ in spans:
-            if w.get("speaker_id") == sid and a <= start <= b:
-                w["speaker_id"] = label
-                break
-
-    pins, seconds = {}, {}
-    for sid, a, b, label, name in spans:
-        seconds[label] = seconds.get(label, 0.0) + (b - a)
-        pins[label] = name
-        # the new labels join the voice report so the prompt and the review see them
-        voice.setdefault(label, {
-            "name": name, "score": None, "runner_up": None, "margin": None,
-            "accepted": True, "unknown": False, "votes": None,
-            "all": {}, "split_of": sid,
-        })
-    log.info("  %d label(s) held more than one voice, split into: %s",
-             len({s[0] for s in spans}),
-             ", ".join(f"{l} ({s:.0f}s)" for l, s in sorted(seconds.items())))
-    return pins
-
-
-def review_voice(voice: dict, stats: dict) -> None:
-    """One line per label: matched, too close to call, or nobody we know."""
-    for sid in sorted(voice, key=lambda s: -stats.get(s, {}).get("words", 0)):
-        v = voice[sid]
-        rival = f", runner-up {v['runner_up']:.2f}" if v.get("runner_up") is not None else ""
-        if v.get("split"):
-            names = ", ".join(sorted({p["name"] or "?" for p in v["split"]}))
-            log.info("  %-12s mixed, holds %s: splitting", sid, names)
-        elif v["accepted"]:
-            log.info("  %-12s %-16s %.2f%s", sid, v["name"], v["score"], rival)
-        elif v.get("unknown"):
-            log.info("  %-12s %-16s best %.2f, left to the LLM", sid, "unknown voice",
-                     v["score"] or 0)
-        else:
-            log.info("  %-12s %-16s %.2f%s, too close, left to the LLM",
-                     sid, v["name"] + "?", v["score"], rival)
-
-
-def voice_prompt_block(voice: dict) -> str:
-    """What the acoustics say about the labels voice ID could NOT settle.
-
-    The scores go in raw because their most useful half is negative: a name that
-    scores below 0.30 on a label is not that person. Without this the model reads
-    the text, sees client-side questions, and hands the label to whoever plays the
-    client role, even when that person is demonstrably a different voice.
-    """
-    undecided = {sid: v for sid, v in sorted(voice.items()) if not v["accepted"]}
-    if not undecided:
-        return ""
-    settled = {v["name"]: (sid, v["score"]) for sid, v in voice.items() if v["accepted"]}
-    block = ["Voice identification (acoustic, independent of the words). "
-             "Similarity of each label's voice to enrolled voiceprints:"]
-    for sid, v in undecided.items():
-        if v.get("unknown") and not (v.get("all") or {}):
-            best = f", best similarity {v['score']:.2f}" if v.get("score") else ""
-            block.append(f"- {sid}: matches no known voice{best}")
-        elif v.get("split"):
-            taken = ", ".join(sorted({p["name"] for p in v["split"]}))
-            block.append(f"- {sid}: several voices under this label. The lines of "
-                         f"{taken} were already moved to their own labels. Whoever is "
-                         "left here is NOT them: it is someone without a voiceprint. "
-                         "Identify them from the content (how they introduce "
-                         "themselves, how others address them).")
-        else:
-            scores = ", ".join(f"{n} {s:.2f}" for n, s in (v.get("all") or {}).items())
-            out = [n for n, s in (v.get("all") or {}).items() if s < VOICE_UNLIKELY]
-            ruled = f" -> RULED OUT for this label: {', '.join(out)}" if out else ""
-            block.append(f"- {sid}: {scores}{ruled}")
-    block.append("How to read this: 0.45+ means it is that person; below 0.30 means it "
-                 "is NOT that person; in between the acoustics cannot decide, use the "
-                 "content.")
-    if settled:
-        lines = ", ".join(f"{n} = {sid}" + (f" ({s:.2f})" if s else "")
-                          for n, (sid, s) in sorted(settled.items()))
-        block.append(f"Already identified by voice: {lines}. If a label scores below "
-                     "0.30 against one of these people, it is someone else: do not give "
-                     "it that name even if the content suggests it. It is someone with "
-                     "no voiceprint (a client, a guest).")
-    return "\n".join(block) + "\n"
-
-
-def flag_voice_conflicts(mapping: dict, voice: dict) -> None:
-    """Last line of defence: the LLM gave a label a name the acoustics rule out.
-
-    A score below 0.30 against a person's own voiceprint is positive evidence it
-    is not them. Saying so in the prompt is not enough: models have been seen to
-    read `Alice 0.21` for a label and name it Alice anyway. Names without a
-    voiceprint are left alone, the acoustics have nothing to say about them.
-    """
-    for sid, m in mapping.items():
-        if m["confidence"] == "pinned":
-            continue
-        here = (voice.get(sid, {}).get("all") or {}).get(m["name"])
-        if here is None or here >= VOICE_UNLIKELY:
-            continue
-        # The name is excluded, not merely doubtful, so it comes off. Fall back to
-        # whoever the voice liked best if the acoustics allow them at all, else to
-        # the bare label: `Alice?` on a client's 400 words still reads as Alice.
-        alt, alt_score = max((v.get("all") or {}).items(), key=lambda kv: kv[1],
-                             default=(None, 0.0)) if (v := voice.get(sid)) else (None, 0.0)
-        was = m["name"]
-        m["confidence"] = "low"
-        if alt and alt != was and alt_score >= VOICE_UNLIKELY:
-            m["name"] = alt
-            m["evidence"] = (f"{was} ruled out by voice ({here:.2f}); "
-                             f"closest voice is {alt} ({alt_score:.2f})")
-        else:
-            m["name"] = sid
-            m["evidence"] = f"{was} ruled out by voice ({here:.2f}), no known voice fits"
-
-
 # ── speaker naming (LLM) ─────────────────────────────────────────────────────
 
 MAP_PROMPT = """You are labelling a recorded conversation by speaker.
@@ -376,7 +204,7 @@ MAP_PROMPT = """You are labelling a recorded conversation by speaker.
 Project: {name}
 Context: {context}
 {roster}
-{roles}{pinned}{voice}
+{roles}
 Diarization produced {n_labels} labels. Statistics per label:
 {stats}
 IMPORTANT: there are often MORE labels than real people, because diarization
@@ -414,10 +242,7 @@ Transcript:
 {transcript}
 """
 
-ROSTER_RULES = """- Give each label exactly one name, strictly from the participant list. The
-  one exception: a label whose voice matched no known voice (see the voice
-  identification block). If that person introduces themselves or is addressed by
-  name, use that name; otherwise keep the label id as the name.
+ROSTER_RULES = """- Give each label exactly one name, strictly from the participant list.
 - If there are fewer voices than names on the list, leave the extra names unused."""
 
 OPEN_RULES = """- Nobody told you who was on this call. Use a person's name only when the
@@ -446,7 +271,7 @@ def speaker_stats(turns: list[dict]) -> dict:
     return stats
 
 
-def parse_mapping(raw: str, ids: list[str], pinned: dict, pin_note: dict) -> dict:
+def parse_mapping(raw: str, ids: list[str]) -> dict:
     """The model's JSON reply -> {speaker_id: {"name", "confidence", "evidence"}}."""
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:
@@ -459,10 +284,6 @@ def parse_mapping(raw: str, ids: list[str], pinned: dict, pin_note: dict) -> dic
 
     out: dict = {}
     for sid in ids:
-        if sid in pinned:
-            out[sid] = {"name": pinned[sid], "confidence": "pinned",
-                        "evidence": pin_note.get(sid, "")}
-            continue
         v = reply.get(sid)
         if isinstance(v, str):
             v = {"name": v, "confidence": "medium", "evidence": ""}
@@ -477,17 +298,10 @@ def parse_mapping(raw: str, ids: list[str], pinned: dict, pin_note: dict) -> dic
     return out
 
 
-def map_speakers(turns: list[dict], settings: dict, llm_cfg: dict, pinned: dict,
-                 pin_note: dict | None = None, voice: dict | None = None) -> dict:
-    """Name every diarization label. `pinned` labels are given to the model as fact
-    and passed straight through; `voice` carries what the acoustics say about the
-    rest."""
+def map_speakers(turns: list[dict], settings: dict, llm_cfg: dict) -> dict:
+    """Name every diarization label."""
     ids = sorted({t["speaker"] for t in turns})
     stats = speaker_stats(turns)
-    pin_note = pin_note or {}
-    if all(sid in pinned for sid in ids):     # everything settled by voice
-        return parse_mapping("{}", ids, pinned, pin_note)
-
     speakers = settings.get("speakers") or []
     log.info("Naming %d speaker label(s) with %s", len(ids), llm_cfg.get("model"))
     roles = settings.get("roles") or {}
@@ -495,27 +309,19 @@ def map_speakers(turns: list[dict], settings: dict, llm_cfg: dict, pinned: dict,
     if roles:
         lines = "\n".join(f"- {name}: {desc}" for name, desc in roles.items())
         roles_block = f"Who is who (use it to tell people apart):\n{lines}\n"
-    pinned_block = ""
-    if pinned:
-        lines = "\n".join(f"- {sid} = {name} ({pin_note.get(sid, 'given')})"
-                          for sid, name in sorted(pinned.items()))
-        pinned_block = ("ALREADY KNOWN FOR CERTAIN (do not revise, use as anchors "
-                        f"for the rest):\n{lines}\n")
     prompt = MAP_PROMPT.format(
         name=settings.get("name") or "-",
         context=" ".join((settings.get("context") or "-").split()),
         roster=f"Participants: {', '.join(speakers)}" if speakers
         else "Participants: unknown",
         roles=roles_block,
-        pinned=pinned_block,
-        voice=voice_prompt_block(voice or {}),
         n_labels=len(ids),
         stats="\n".join(f"- {sid}: {stats[sid]['words']} words, {stats[sid]['turns']} turns"
                         for sid in ids),
         rules=ROSTER_RULES if speakers else OPEN_RULES,
         transcript=sample_for_mapping(turns),
     )
-    return parse_mapping(llm.complete(llm_cfg, prompt), ids, pinned, pin_note)
+    return parse_mapping(llm.complete(llm_cfg, prompt), ids)
 
 
 def review_mapping(mapping: dict, stats: dict) -> list[str]:
@@ -746,7 +552,6 @@ other commands:
   transcribe doctor                           check the setup
   transcribe projects [NAME]                  projects in config.yaml
   transcribe summarize TRANSCRIPT             redo the summary of a transcript
-  transcribe voices enroll|check              voiceprints for speaker ID
   transcribe record                           record a call on macOS
 """
 
@@ -834,6 +639,7 @@ def run(argv: list[str]) -> None:
         # num_speakers is a cap for Scribe, not a hint: a roster of one would tell
         # it not to diarize at all, so below two it works the count out itself
         params = {"num_speakers": len(speakers) if len(speakers) > 1 else None}
+        model = settings["transcription_model"]
         cache_file = CACHE / f"{fp}.scribe.json"
         cached = json.loads(cache_file.read_text()) if cache_file.exists() else None
         if cached and not args.retranscribe:
@@ -842,30 +648,23 @@ def run(argv: list[str]) -> None:
                             f"of speakers ({cached['params']['num_speakers'] or 'auto'}). "
                             "Pass --retranscribe to transcribe it again with the new list "
                             "(ElevenLabs charges again).")
-            log.info("Using the cached transcription (no charge)")
+            # caches from before the model was recorded were all made with scribe_v2
+            was = cached.get("model", "scribe_v2")
+            if was != model:
+                raise Error(f"this audio was transcribed before with {was}, the config now "
+                            f"says {model}. Pass --retranscribe to transcribe it again "
+                            f"with {model} (ElevenLabs charges again).")
+            log.info("Using the cached %s transcription (no charge)", model)
             words = cached["words"]
         else:
             words = scribe(audio, params["num_speakers"], build_keyterms(settings, speakers),
-                           settings["transcription_model"])
-            cached = {"params": params, "words": words}
+                           model)
+            cached = {"params": params, "model": model, "words": words}
             cache_file.write_text(json.dumps(cached, ensure_ascii=False))
 
-        pinned, pin_note = {}, {}
-        voice = voice_identify(audio, words, speakers, fp)
-        if voice:
-            review_voice(voice, speaker_stats(build_turns(words)))
-            for sid, v in voice.items():
-                if v["accepted"]:
-                    pinned[sid] = v["name"]
-                    pin_note[sid] = f"identified by voice, similarity {v['score']:.2f}"
-            for label, name in apply_voice_splits(words, voice).items():
-                pinned.setdefault(label, name)
-                pin_note[label] = "part of a mixed label, identified by voice"
         turns = build_turns(words)
         stats = speaker_stats(turns)
-        mapping = map_speakers(turns, settings, llm_cfg, pinned, pin_note, voice)
-        if voice:
-            flag_voice_conflicts(mapping, voice)
+        mapping = map_speakers(turns, settings, llm_cfg)
         shaky = review_mapping(mapping, stats)
         review_roster(mapping, speakers, stats)
 

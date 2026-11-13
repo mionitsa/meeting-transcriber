@@ -1,6 +1,6 @@
 """
 Tests for the parts of the pipeline where bugs actually lived: parsing, turn
-building, the voice-vs-LLM conflict rules, rendering, file naming, provider
+building, speaker naming, rendering, file naming, provider
 requests, and one end-to-end run with the two network calls stubbed out.
 
 No network, no API keys, no real config: run with `uv run pytest`.
@@ -149,89 +149,17 @@ def test_build_turns_defaults_a_missing_speaker_and_drops_empties():
     assert turns == [{"speaker": "speaker_0", "text": "Ok"}]
 
 
-# ── voice ID glue ────────────────────────────────────────────────────────────
-
-def test_apply_voice_splits_is_a_noop_without_splits():
-    ws = words(("Hello", "word", "speaker_2"))
-    assert tr.apply_voice_splits(ws, {"speaker_2": {"name": "Sam"}}) == {}
-    assert ws[0]["speaker_id"] == "speaker_2"
-
-
-def test_apply_voice_splits_moves_words_to_their_own_label():
-    ws = [{"text": "A", "type": "word", "speaker_id": "speaker_2", "start": 1.0},
-          {"text": "B", "type": "word", "speaker_id": "speaker_2", "start": 9.0}]
-    voice = {"speaker_2": {"name": None, "accepted": False,
-                           "split": [{"start": 0.0, "end": 5.0, "name": "Carol"}]}}
-    pins = tr.apply_voice_splits(ws, voice)
-
-    assert pins == {"speaker_2·Carol": "Carol"}
-    assert ws[0]["speaker_id"] == "speaker_2·Carol"   # inside the span
-    assert ws[1]["speaker_id"] == "speaker_2"          # outside: left alone
-    assert voice["speaker_2·Carol"]["split_of"] == "speaker_2"
-
-
-def voice_entry(all_scores: dict, **kw) -> dict:
-    entry = {"name": None, "score": None, "runner_up": None, "margin": None,
-             "accepted": False, "unknown": False, "votes": None, "all": all_scores}
-    return {**entry, **kw}
-
-
-def test_flag_voice_conflicts_replaces_an_excluded_name():
-    # the LLM read `Alice 0.21` and named the label Alice anyway: below 0.30 the
-    # acoustics rule her out, so the name comes off
-    mapping = {"speaker_1": {"name": "Alice", "confidence": "high", "evidence": ""}}
-    voice = {"speaker_1": voice_entry({"Alice": 0.21, "Bob": 0.55})}
-    tr.flag_voice_conflicts(mapping, voice)
-
-    assert mapping["speaker_1"]["name"] == "Bob"
-    assert mapping["speaker_1"]["confidence"] == "low"
-    assert "ruled out by voice" in mapping["speaker_1"]["evidence"]
-
-
-def test_flag_voice_conflicts_falls_back_to_the_bare_label():
-    mapping = {"speaker_1": {"name": "Alice", "confidence": "high", "evidence": ""}}
-    voice = {"speaker_1": voice_entry({"Alice": 0.21, "Bob": 0.18})}
-    tr.flag_voice_conflicts(mapping, voice)
-
-    assert mapping["speaker_1"]["name"] == "speaker_1"
-    assert tr.speaker_label(mapping, "speaker_1") == "Speaker 2"
-
-
-def test_flag_voice_conflicts_leaves_pins_and_unenrolled_names_alone():
-    mapping = {
-        "speaker_1": {"name": "Alice", "confidence": "pinned", "evidence": ""},
-        "speaker_2": {"name": "Dan", "confidence": "high", "evidence": ""},
-    }
-    voice = {"speaker_1": voice_entry({"Alice": 0.10}),
-             "speaker_2": voice_entry({"Alice": 0.10})}  # Dan has no voiceprint
-    tr.flag_voice_conflicts(mapping, voice)
-
-    assert mapping["speaker_1"]["name"] == "Alice"
-    assert mapping["speaker_2"]["name"] == "Dan"
-
-
-def test_voice_prompt_block_lists_exclusions_and_is_empty_when_settled():
-    voice = {"speaker_0": voice_entry({"Sam": 0.62}, accepted=True, name="Sam", score=0.62),
-             "speaker_1": voice_entry({"Sam": 0.12, "Carol": 0.38})}
-    block = tr.voice_prompt_block(voice)
-    assert "RULED OUT for this label: Sam" in block
-    assert "Already identified by voice" in block
-    assert tr.voice_prompt_block({"speaker_0": voice_entry({}, accepted=True)}) == ""
-
-
 # ── speaker naming ───────────────────────────────────────────────────────────
 
 def test_parse_mapping_tolerates_fences_flat_values_and_gaps():
     raw = ('```json\n{"speaker_0": {"name": "Sam", "confidence": "HIGH"},'
            ' "speaker_1": "Carol"}\n```')
-    out = tr.parse_mapping(raw, ["speaker_0", "speaker_1", "speaker_2", "speaker_3"],
-                           {"speaker_3": "Bob"}, {"speaker_3": "by voice"})
+    out = tr.parse_mapping(raw, ["speaker_0", "speaker_1", "speaker_2"])
     assert out["speaker_0"] == {"name": "Sam", "confidence": "high", "evidence": ""}
     assert out["speaker_1"]["name"] == "Carol"
     assert out["speaker_2"]["name"] == "speaker_2"          # not labelled: kept as is
-    assert out["speaker_3"]["confidence"] == "pinned"
     with pytest.raises(common.Error):
-        tr.parse_mapping("no json here", ["speaker_0"], {}, {})
+        tr.parse_mapping("no json here", ["speaker_0"])
 
 
 def test_without_a_roster_the_prompt_forbids_inventing_names(monkeypatch):
@@ -243,9 +171,9 @@ def test_without_a_roster_the_prompt_forbids_inventing_names(monkeypatch):
 
     monkeypatch.setattr(llm, "complete", fake)
     turns = [{"speaker": "speaker_0", "text": "hi"}, {"speaker": "speaker_1", "text": "yo"}]
-    tr.map_speakers(turns, {"speakers": []}, {"model": "m"}, {})
+    tr.map_speakers(turns, {"speakers": []}, {"model": "m"})
     assert "Never invent a name" in seen["prompt"]
-    tr.map_speakers(turns, {"speakers": ["Sam", "Carol"]}, {"model": "m"}, {})
+    tr.map_speakers(turns, {"speakers": ["Sam", "Carol"]}, {"model": "m"})
     assert "strictly from the participant list" in seen["prompt"]
 
 
@@ -411,38 +339,6 @@ def test_rearchiving_the_same_recording_is_a_no_op(tmp_path):
     assert sorted(q.name for q in mtg.iterdir()) == ["recording.ogg"]
 
 
-# ── voiceprint assignment ────────────────────────────────────────────────────
-
-def test_assign_is_exclusive_between_labels():
-    from meeting_transcriber import voiceid
-
-    result = voiceid.assign({"c0": {"alice": 0.70, "carol": 0.40},
-                             "c1": {"alice": 0.60, "carol": 0.50}})
-    assert result["c0"]["name"] == "alice"
-    assert result["c1"]["name"] == "carol"      # alice was struck out
-    assert result["c0"]["accepted"] is True
-    # c1 only won carol by elimination: its own runner-up is higher, so it is a guess
-    assert result["c1"]["accepted"] is False
-
-
-def test_assign_flags_a_voice_nobody_is_enrolled_for():
-    from meeting_transcriber import voiceid
-
-    result = voiceid.assign({"c0": {"alice": 0.20, "carol": 0.15}})
-    assert result["c0"]["unknown"] is True
-    assert result["c0"]["accepted"] is False
-
-
-def test_assign_needs_both_score_and_margin():
-    from meeting_transcriber import voiceid
-
-    strong = voiceid.assign({"c0": {"alice": 0.80, "carol": 0.20}})["c0"]
-    close = voiceid.assign({"c0": {"alice": 0.50, "carol": 0.48}})["c0"]
-    assert strong["accepted"] is True
-    assert close["accepted"] is False           # score is fine, margin is not
-    assert close["unknown"] is False
-
-
 # ── LLM providers ────────────────────────────────────────────────────────────
 
 class FakeResponse:
@@ -601,7 +497,6 @@ def test_end_to_end_with_stubbed_services(tmp_path, monkeypatch, capsys):
            "output_dir": str(tmp_path / "out"), "inbox": str(inbox)}
     monkeypatch.setattr(tr, "load_config", lambda: cfg)
     monkeypatch.setattr(tr, "CACHE", tmp_path / "cache")
-    monkeypatch.setattr(tr, "VOICEPRINTS", tmp_path / "no-voiceprints")
     monkeypatch.setattr(tr, "scribe", lambda *a: [
         {"text": "Hi, I'm Sam.", "type": "word", "speaker_id": "speaker_0", "start": 0.0},
         {"text": "Hello.", "type": "word", "speaker_id": "speaker_1", "start": 1.0}])
@@ -625,6 +520,22 @@ def test_end_to_end_with_stubbed_services(tmp_path, monkeypatch, capsys):
                       "summary": str(mtg / "summary.md"),
                       "short": str(mtg / "summary-short.txt"),
                       "recording": str(mtg / "recording.mp3")}
+
+
+@needs_ffmpeg
+def test_cache_from_another_model_is_not_reused(tmp_path, monkeypatch):
+    audio = tmp_path / "2026-08-09-call.mp3"
+    tone(audio, 2)
+    cfg = {**common.DEFAULTS, "llm": {"provider": "openai", "model": "m"},
+           "output_dir": str(tmp_path / "out"), "transcription_model": "scribe_v3"}
+    monkeypatch.setattr(tr, "load_config", lambda: cfg)
+    monkeypatch.setattr(tr, "CACHE", tmp_path / "cache")
+    (tmp_path / "cache").mkdir()
+    # written before the model was recorded, so it was scribe_v2
+    (tmp_path / "cache" / f"{tr.fingerprint([audio])}.scribe.json").write_text(
+        json.dumps({"params": {"num_speakers": None}, "words": []}))
+    with pytest.raises(common.Error, match="with scribe_v2.*--retranscribe"):
+        tr.run([str(audio)])
 
 
 def test_complete_uses_an_injected_call_and_sends_nothing():

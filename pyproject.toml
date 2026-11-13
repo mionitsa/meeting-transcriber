@@ -15,14 +15,12 @@ dependencies = [
 [project.optional-dependencies]
 # Google Vertex AI as the LLM provider (a Gemini API key works without this)
 vertex = ["google-genai>=1.0"]
-# Speaker identification by voiceprint (pulls in torch, a large download)
-voice = ["speechbrain>=1.0", "torch", "torchaudio", "soundfile", "numpy"]
 
 [project.scripts]
 transcribe = "meeting_transcriber.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "numpy"]
+dev = ["pytest>=8"]
 
 [build-system]
 requires = ["hatchling"]
