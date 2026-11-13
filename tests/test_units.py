@@ -154,12 +154,32 @@ def test_build_turns_defaults_a_missing_speaker_and_drops_empties():
 def test_parse_mapping_tolerates_fences_flat_values_and_gaps():
     raw = ('```json\n{"speaker_0": {"name": "Sam", "confidence": "HIGH"},'
            ' "speaker_1": "Carol"}\n```')
-    out = tr.parse_mapping(raw, ["speaker_0", "speaker_1", "speaker_2"])
+    out = tr.parse_mapping(raw, ["speaker_0", "speaker_1", "speaker_2", "speaker_3"],
+                           {"speaker_3": "Bob"}, {"speaker_3": "given"})
     assert out["speaker_0"] == {"name": "Sam", "confidence": "high", "evidence": ""}
     assert out["speaker_1"]["name"] == "Carol"
     assert out["speaker_2"]["name"] == "speaker_2"          # not labelled: kept as is
+    assert out["speaker_3"]["confidence"] == "pinned"
     with pytest.raises(common.Error):
         tr.parse_mapping("no json here", ["speaker_0"])
+
+
+def test_host_programs_pin_names_positionally():
+    # lifey calls exactly this: map_speakers(turns, settings, llm_cfg, pinned, notes).
+    # Changing the signature breaks it in production, so this test guards the API.
+    seen = []
+    cfg = {"call": lambda prompt, model: seen.append(prompt) or
+           '{"speaker_1": {"name": "Carol", "confidence": "high"}}', "model": "m"}
+    turns = [{"speaker": "speaker_0", "text": "hi"}, {"speaker": "speaker_1", "text": "yo"}]
+    out = tr.map_speakers(turns, {"speakers": ["Sam", "Carol"]}, cfg,
+                          {"speaker_0": "Sam"}, {"speaker_0": "named in the conversation"})
+    assert out["speaker_0"] == {"name": "Sam", "confidence": "pinned",
+                                "evidence": "named in the conversation"}
+    assert out["speaker_1"]["name"] == "Carol"
+    assert "speaker_0 = Sam" in seen[0]
+    # everything known already: no LLM call at all
+    assert tr.map_speakers(turns, {}, cfg, {"speaker_0": "Sam", "speaker_1": "Carol"},
+                           {})["speaker_1"]["name"] == "Carol" and len(seen) == 1
 
 
 def test_without_a_roster_the_prompt_forbids_inventing_names(monkeypatch):
