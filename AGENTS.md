@@ -109,5 +109,9 @@ means nobody could tell. Re-running the same file does not charge ElevenLabs aga
 - Conventions: progress and warnings go through `log` (stderr); results go to stdout
   with `print`. Failures the user can act on raise `common.Error` with the fix in the
   message; `cli.main` prints it as `error: ...` and exits 1.
+- Releasing: bump `version` in `pyproject.toml`. When main passes CI, the `release`
+  job tags it `vX.Y.Z`, and lifey's daily workflow picks the new tag up, tests it and
+  deploys. lifey imports `transcribe.scribe`, `map_speakers` (with `pinned`),
+  `build_turns`, the render helpers and `summarize`: keep those signatures stable.
 - The LLM never edits transcript text, it only maps speaker labels to names. Keep it
   that way.

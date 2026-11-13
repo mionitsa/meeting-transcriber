@@ -204,7 +204,7 @@ MAP_PROMPT = """You are labelling a recorded conversation by speaker.
 Project: {name}
 Context: {context}
 {roster}
-{roles}
+{roles}{pinned}
 Diarization produced {n_labels} labels. Statistics per label:
 {stats}
 IMPORTANT: there are often MORE labels than real people, because diarization
@@ -271,8 +271,11 @@ def speaker_stats(turns: list[dict]) -> dict:
     return stats
 
 
-def parse_mapping(raw: str, ids: list[str]) -> dict:
-    """The model's JSON reply -> {speaker_id: {"name", "confidence", "evidence"}}."""
+def parse_mapping(raw: str, ids: list[str], pinned: dict | None = None,
+                  pin_note: dict | None = None) -> dict:
+    """The model's JSON reply -> {speaker_id: {"name", "confidence", "evidence"}}.
+    `pinned` labels keep their given name whatever the reply says."""
+    pinned, pin_note = pinned or {}, pin_note or {}
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:
         raise Error(f"speaker naming: no JSON in the LLM reply:\n{raw[:500]}")
@@ -284,6 +287,10 @@ def parse_mapping(raw: str, ids: list[str]) -> dict:
 
     out: dict = {}
     for sid in ids:
+        if sid in pinned:
+            out[sid] = {"name": pinned[sid], "confidence": "pinned",
+                        "evidence": pin_note.get(sid, "")}
+            continue
         v = reply.get(sid)
         if isinstance(v, str):
             v = {"name": v, "confidence": "medium", "evidence": ""}
@@ -298,10 +305,17 @@ def parse_mapping(raw: str, ids: list[str]) -> dict:
     return out
 
 
-def map_speakers(turns: list[dict], settings: dict, llm_cfg: dict) -> dict:
-    """Name every diarization label."""
+def map_speakers(turns: list[dict], settings: dict, llm_cfg: dict, pinned: dict | None = None,
+                 pin_note: dict | None = None) -> dict:
+    """Name every diarization label. `pinned` ({label: name}) is what a host program
+    already knows: given to the model as fact and passed straight through. Part of
+    the library API (lifey pins the names a user filed with), so keep it stable."""
     ids = sorted({t["speaker"] for t in turns})
     stats = speaker_stats(turns)
+    pinned, pin_note = pinned or {}, pin_note or {}
+    if all(sid in pinned for sid in ids):     # nothing left to name
+        return parse_mapping("{}", ids, pinned, pin_note)
+
     speakers = settings.get("speakers") or []
     log.info("Naming %d speaker label(s) with %s", len(ids), llm_cfg.get("model"))
     roles = settings.get("roles") or {}
@@ -309,19 +323,26 @@ def map_speakers(turns: list[dict], settings: dict, llm_cfg: dict) -> dict:
     if roles:
         lines = "\n".join(f"- {name}: {desc}" for name, desc in roles.items())
         roles_block = f"Who is who (use it to tell people apart):\n{lines}\n"
+    pinned_block = ""
+    if pinned:
+        lines = "\n".join(f"- {sid} = {name} ({pin_note.get(sid, 'given')})"
+                          for sid, name in sorted(pinned.items()))
+        pinned_block = ("ALREADY KNOWN FOR CERTAIN (do not revise, use as anchors "
+                        f"for the rest):\n{lines}\n")
     prompt = MAP_PROMPT.format(
         name=settings.get("name") or "-",
         context=" ".join((settings.get("context") or "-").split()),
         roster=f"Participants: {', '.join(speakers)}" if speakers
         else "Participants: unknown",
         roles=roles_block,
+        pinned=pinned_block,
         n_labels=len(ids),
         stats="\n".join(f"- {sid}: {stats[sid]['words']} words, {stats[sid]['turns']} turns"
                         for sid in ids),
         rules=ROSTER_RULES if speakers else OPEN_RULES,
         transcript=sample_for_mapping(turns),
     )
-    return parse_mapping(llm.complete(llm_cfg, prompt), ids)
+    return parse_mapping(llm.complete(llm_cfg, prompt), ids, pinned, pin_note)
 
 
 def review_mapping(mapping: dict, stats: dict) -> list[str]:
